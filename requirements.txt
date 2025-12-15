@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+pdf2image
+qdrant-client
+langchain-voyageai
+google-genai
+langchain
+python-multipart
+python-dotenv
+langchain_qdrant

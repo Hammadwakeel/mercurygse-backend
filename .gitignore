@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual Environments ---
+# Common names for virtual envs
+venv/
+env/
+.env/
+.venv/
+
+# --- Environment Variables (CRITICAL) ---
+# Never commit secrets or api keys
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# --- Distribution / Packaging ---
+dist/
+build/
+*.egg-info/
+
+# --- Testing & Coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# --- Jupyter Notebooks (if applicable) ---
+.ipynb_checkpoints
+
+# --- IDE / Editors ---
+.vscode/
+.idea/
+*.swp
+
+# --- Databases ---
+# Ignore local SQLite databases so you don't overwrite prod data or commit binary blobs
+*.sqlite3
+*.db
+
+# --- Logs ---
+*.log
+logs/
