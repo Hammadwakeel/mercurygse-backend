@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse, FileResponse
 import os
 import json
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.post("/pdf/stream")
-async def process_pdf_stream(file: UploadFile = File(...), max_pages: Optional[int] = None):
+async def process_pdf_stream(file: UploadFile = File(...), max_pages: Optional[int] = None, download: Optional[bool] = False, background_tasks: BackgroundTasks = None):
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail='Only PDF uploads are supported')
     tmp_path, filename = save_upload_file_tmp(file)
@@ -24,10 +24,71 @@ async def process_pdf_stream(file: UploadFile = File(...), max_pages: Optional[i
     q = queue.Queue()
     job_id = str(uuid.uuid4())
     logger.info("Received upload %s -> %s; job=%s", file.filename, tmp_path, job_id)
-
     def progress_hook(ev: dict):
         ev_out = {"job_id": job_id, **ev}
         q.put(ev_out)
+
+    # If client requested a blocking download, run pipeline and return the file response
+    if download:
+        try:
+            # keep_report so pipeline does not delete the report; run_pipeline may return a FileResponse when keep_report=True
+            ret = run_pipeline(tmp_path, max_pages=max_pages, progress_hook=progress_hook, doc_id=job_id, original_filename=filename, keep_report=True)
+            # If run_pipeline returned a FileResponse, return it directly to the client
+            if hasattr(ret, 'background') or isinstance(ret, FileResponse):
+                return ret
+        except Exception as e:
+            # ensure tmp is cleaned
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail=str(e))
+
+        # determine report path; if no file but report_text present, write a temp file
+        report_path = None
+        if isinstance(ret, dict):
+            report_path = ret.get('report_path')
+            report_text = ret.get('report_text')
+        else:
+            report_text = None
+
+        if not report_path and report_text:
+            # write report to DATA_DIR
+            from ..utils import DATA_DIR
+            fp = os.path.join(DATA_DIR, f"report_{job_id}.md")
+            with open(fp, 'w', encoding='utf-8') as f:
+                f.write(report_text)
+            report_path = fp
+
+        if not report_path or not os.path.exists(report_path):
+            # nothing to return
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail='Report not available')
+
+        # schedule cleanup after response
+        def _cleanup(path_tmp: str, path_report: str):
+            try:
+                if os.path.exists(path_tmp):
+                    os.remove(path_tmp)
+            except Exception:
+                pass
+            try:
+                if os.path.exists(path_report):
+                    os.remove(path_report)
+            except Exception:
+                pass
+
+        if background_tasks is None:
+            background_tasks = BackgroundTasks()
+        background_tasks.add_task(_cleanup, tmp_path, report_path)
+        return FileResponse(report_path, media_type='text/markdown', filename=os.path.basename(report_path))
+
+    
 
     def worker():
         try:

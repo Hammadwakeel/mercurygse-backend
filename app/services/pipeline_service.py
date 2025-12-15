@@ -24,6 +24,9 @@ from . import model_client
 from google import genai as _genai_module
 from google.genai import types as genai_types
 from .. import utils as app_utils
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
+import json
 from . import qdrant_service
 import tempfile
 import logging
@@ -665,6 +668,7 @@ def run_pipeline(
     progress_hook: Optional[Callable[[dict], None]] = None,
     doc_id: Optional[str] = None,
     original_filename: Optional[str] = None,
+    keep_report: bool = False,
 ):
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"{pdf_path} not found")
@@ -736,14 +740,15 @@ def run_pipeline(
                     app_utils.append_metadata_entry(entry)
             except Exception as e:
                 print(f"Warning: failed to append metadata: {e}")
-            # remove temp files
-            try:
-                if os.path.exists(pdf_path):
-                    os.remove(pdf_path)
-                if os.path.exists(report_path):
-                    os.remove(report_path)
-            except Exception as e:
-                print(f"Warning: failed to remove temp files: {e}")
+                # remove temp files unless caller asked to keep the report (e.g., for direct download)
+                try:
+                    if not keep_report:
+                        if os.path.exists(pdf_path):
+                            os.remove(pdf_path)
+                        if os.path.exists(report_path):
+                            os.remove(report_path)
+                except Exception as e:
+                    print(f"Warning: failed to remove temp files: {e}")
         else:
             # If ingestion failed due to billing/permission on the embeddings provider, skip deletion
             # and surface the report contents to the caller so they can download/use it without ingestion.
@@ -770,6 +775,22 @@ def run_pipeline(
 
     if progress_hook:
         progress_hook({"event": "completed", "pages_processed": pages_processed, "ingest_result": ingest_res, "report_path": report_path})
+
+    # If caller requested the report be kept for direct download, return a FileResponse
+    def _cleanup_files(*paths: str):
+        for p in paths:
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+    if keep_report:
+        # Attach metadata into headers as JSON string (caller can parse)
+        meta = {"pages_processed": pages_processed, "ingest": ingest_res}
+        headers = {"X-Pipeline-Meta": json.dumps(meta)}
+        bg = BackgroundTask(_cleanup_files, pdf_path, report_path)
+        return FileResponse(path=report_path, media_type='text/markdown', filename=os.path.basename(report_path), background=bg, headers=headers)
 
     # also return report text (best-effort) when ingestion failed due to billing so callers get the MD
     out = {"report_path": report_path, "pages_processed": pages_processed, "results": results, "ingest": ingest_res}
