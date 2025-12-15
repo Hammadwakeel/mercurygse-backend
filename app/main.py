@@ -45,6 +45,14 @@ def startup_event():
     else:
         logger.warning("Qdrant client not initialized - missing URL/API key or import failure")
 
+    # Start metadata cleanup background thread (deletes reports after retention)
+    try:
+        from .utils import start_cleanup_thread
+        start_cleanup_thread()
+        logger.info("Started metadata cleanup thread (24h retention)")
+    except Exception:
+        logger.exception("Failed to start cleanup thread")
+
 
 app.include_router(api_router)
 

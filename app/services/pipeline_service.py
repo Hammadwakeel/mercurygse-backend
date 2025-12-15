@@ -736,7 +736,14 @@ def run_pipeline(
             # append metadata entry if doc_id provided
             try:
                 if doc_id or original_filename:
-                    entry = {"uuid": doc_id or "", "original_filename": original_filename or os.path.basename(pdf_path), "report": report_path, "created_at": time.time()}
+                    now = time.time()
+                    entry = {
+                        "uuid": doc_id or "",
+                        "original_filename": original_filename or os.path.basename(pdf_path),
+                        "report": report_path,
+                        "created_at": now,
+                        "expires_at": now + (24 * 3600),
+                    }
                     app_utils.append_metadata_entry(entry)
             except Exception as e:
                 print(f"Warning: failed to append metadata: {e}")
@@ -766,6 +773,19 @@ def run_pipeline(
                             progress_hook({"event": "report_attached", "report_text": report_text, "report_path": report_path})
                 except Exception:
                     # best-effort only
+                    pass
+                # also append metadata so the download-by-job endpoint can find it
+                try:
+                    now = time.time()
+                    entry = {
+                        "uuid": doc_id or "",
+                        "original_filename": original_filename or os.path.basename(pdf_path),
+                        "report": report_path,
+                        "created_at": now,
+                        "expires_at": now + (24 * 3600),
+                    }
+                    app_utils.append_metadata_entry(entry)
+                except Exception:
                     pass
 
     except Exception as e:

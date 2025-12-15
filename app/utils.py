@@ -45,3 +45,54 @@ def read_metadata() -> list:
                 return json.load(f)
         except Exception:
             return []
+
+
+def write_metadata(entries: list):
+    with _metadata_lock:
+        with open(METADATA_PATH, 'w', encoding='utf-8') as f:
+            json.dump(entries, f, ensure_ascii=False, indent=2)
+
+
+def cleanup_expired_reports(retention_seconds: int = 24 * 3600, interval_seconds: int = 60 * 60):
+    """Background loop that removes expired report files and prunes metadata entries.
+
+    - `retention_seconds` controls how long reports are kept after `created_at` or `expires_at`.
+    - `interval_seconds` controls how often the background loop runs.
+    """
+    while True:
+        try:
+            entries = read_metadata()
+            now = time.time()
+            changed = False
+            remaining = []
+            for e in entries:
+                expires = e.get('expires_at') or (e.get('created_at', 0) + retention_seconds)
+                if expires and now >= float(expires):
+                    # delete file if present
+                    p = e.get('report')
+                    try:
+                        if p and os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+                    changed = True
+                else:
+                    remaining.append(e)
+            if changed:
+                write_metadata(remaining)
+        except Exception:
+            pass
+        time.sleep(interval_seconds)
+
+
+_cleanup_thread_started = False
+
+
+def start_cleanup_thread(retention_seconds: int = 24 * 3600, interval_seconds: int = 60 * 60):
+    global _cleanup_thread_started
+    if _cleanup_thread_started:
+        return
+    import threading as _th
+    t = _th.Thread(target=cleanup_expired_reports, args=(retention_seconds, interval_seconds), daemon=True)
+    t.start()
+    _cleanup_thread_started = True
