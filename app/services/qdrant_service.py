@@ -1,9 +1,12 @@
 import re
 import time
 import random
+import logging
 from typing import List, Dict, Optional, Callable
 import os
 from .model_client import init_qdrant_client, init_embeddings
+
+logger = logging.getLogger(__name__)
 
 # chunking regex
 PAGE_SPLIT_RE = re.compile(r'(?m)^(##\s+Page\s+\d+.*)$')
@@ -52,6 +55,23 @@ def ingest_chunks_into_qdrant(
     emb = init_embeddings()
     if qc is None or emb is None:
         return {'error': 'qdrant-or-embeddings-missing'}
+
+    # Determine slowdown between embedding calls to respect provider rate limits.
+    # Env overrides: VOYAGE_EMBED_SLEEP_SECONDS or QDRANT_EMBED_SLEEP_SECONDS
+    slow_seconds = None
+    try:
+        env_s = os.environ.get('VOYAGE_EMBED_SLEEP_SECONDS') or os.environ.get('QDRANT_EMBED_SLEEP_SECONDS')
+        if env_s:
+            slow_seconds = float(env_s)
+        else:
+            # If embeddings backend looks like Voyage, default to 21 seconds (<= 3 RPM)
+            emb_mod = getattr(emb, '__module__', '') or repr(emb)
+            if 'voyage' in emb_mod.lower() or 'voyage' in repr(emb).lower():
+                slow_seconds = 21.0
+    except Exception:
+        slow_seconds = None
+    if slow_seconds:
+        logger.info('Embedding slowdown enabled: sleeping %.2fs between embedding batches', slow_seconds)
 
     try:
         # lazy import heavy libs
@@ -103,6 +123,14 @@ def ingest_chunks_into_qdrant(
             batch_docs = docs_all[i:i+batch_size]
             texts = [d.page_content for d in batch_docs]
 
+            # Optionally sleep before embedding to respect low RPM providers (Voyage)
+            if slow_seconds:
+                try:
+                    logger.debug('Sleeping %.2fs before embedding batch %s', slow_seconds, i // batch_size)
+                    time.sleep(slow_seconds)
+                except Exception:
+                    pass
+
             # get embeddings with retries
             last_err = None
             for attempt in range(1, retry_attempts + 1):
@@ -149,4 +177,8 @@ def ingest_chunks_into_qdrant(
 
         return {'ingested': ingested, 'collection': collection_name}
     except Exception as e:
+        # Detect common billing/permission messages from Voyage / embedding providers
+        s = str(e).lower()
+        if 'payment method' in s or 'add your payment method' in s or 'billing' in s or 'reduced rate limits' in s or 'rate limits' in s:
+            return {'error': 'voyage_billing', 'message': str(e)}
         return {'error': str(e)}

@@ -744,6 +744,24 @@ def run_pipeline(
                     os.remove(report_path)
             except Exception as e:
                 print(f"Warning: failed to remove temp files: {e}")
+        else:
+            # If ingestion failed due to billing/permission on the embeddings provider, skip deletion
+            # and surface the report contents to the caller so they can download/use it without ingestion.
+            if isinstance(ingest_res, dict) and ingest_res.get("error") == "voyage_billing":
+                msg = ingest_res.get("message") or "voyage billing error"
+                if progress_hook:
+                    progress_hook({"event": "ingest_skipped", "reason": "voyage_billing", "message": msg})
+                # include report content in the final payload if small enough
+                try:
+                    size = os.path.getsize(report_path)
+                    if size < 2 * 1024 * 1024:  # only attach if <2MB
+                        with open(report_path, 'r', encoding='utf-8') as _f:
+                            report_text = _f.read()
+                        if progress_hook:
+                            progress_hook({"event": "report_attached", "report_text": report_text, "report_path": report_path})
+                except Exception:
+                    # best-effort only
+                    pass
 
     except Exception as e:
         if progress_hook:
@@ -751,6 +769,17 @@ def run_pipeline(
         raise
 
     if progress_hook:
-        progress_hook({"event": "completed", "pages_processed": pages_processed, "ingest_result": ingest_res})
+        progress_hook({"event": "completed", "pages_processed": pages_processed, "ingest_result": ingest_res, "report_path": report_path})
 
-    return {"report_path": report_path, "pages_processed": pages_processed, "results": results, "ingest": ingest_res}
+    # also return report text (best-effort) when ingestion failed due to billing so callers get the MD
+    out = {"report_path": report_path, "pages_processed": pages_processed, "results": results, "ingest": ingest_res}
+    try:
+        if isinstance(ingest_res, dict) and ingest_res.get("error") == "voyage_billing":
+            size = os.path.getsize(report_path)
+            if size < 2 * 1024 * 1024:
+                with open(report_path, 'r', encoding='utf-8') as _f:
+                    out["report_text"] = _f.read()
+    except Exception:
+        pass
+
+    return out
