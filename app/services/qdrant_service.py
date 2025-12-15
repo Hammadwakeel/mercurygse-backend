@@ -48,7 +48,6 @@ def ingest_chunks_into_qdrant(
 ) -> Dict:
     """Ingest chunks into Qdrant using Voyage embeddings and langchain vector store.
     Implements chunked/batched upserts. Calls `progress_hook` after each batch when provided.
-    This function performs real ingestion and does not support dry-run.
     """
 
     qc = init_qdrant_client()
@@ -107,23 +106,14 @@ def ingest_chunks_into_qdrant(
 
         store = QdrantVectorStore(client=qc, collection_name=collection_name, embedding=emb)
 
-        # helper to get embeddings for a list of texts with fallback
-        def embed_texts(texts: List[str]) -> List[List[float]]:
-            # try common batch method names used by embedding wrappers
-            if hasattr(emb, 'embed_documents'):
-                return emb.embed_documents(texts)
-            if hasattr(emb, 'embed_texts'):
-                return emb.embed_texts(texts)
-            # fallback to per-item embedding
-            return [emb.embed_query(t) for t in texts]
-
         ingested = 0
         # process in batches
         for i in range(0, total_docs, batch_size):
             batch_docs = docs_all[i:i+batch_size]
-            texts = [d.page_content for d in batch_docs]
 
-            # Optionally sleep before embedding to respect low RPM providers (Voyage)
+            # -------------------------------------------------------------
+            # FIX: Sleep BEFORE the embedding call to respect Voyage limits
+            # -------------------------------------------------------------
             if slow_seconds:
                 try:
                     logger.debug('Sleeping %.2fs before embedding batch %s', slow_seconds, i // batch_size)
@@ -131,35 +121,28 @@ def ingest_chunks_into_qdrant(
                 except Exception:
                     pass
 
-            # get embeddings with retries
-            last_err = None
-            for attempt in range(1, retry_attempts + 1):
-                try:
-                    vectors = embed_texts(texts)
-                    break
-                except Exception as e:
-                    last_err = e
-                    if attempt < retry_attempts:
-                        time.sleep(0.5 * attempt + random.uniform(0, 0.2))
-                        continue
-                    raise
-
-            # attach vectors to documents via metadata (QdrantVectorStore will compute embeddings again if not provided),
-            # but many vector stores accept raw embeddings; we can use store.client upsert directly if needed.
-            # We'll attempt store.add_documents(batch) and fall back to per-doc add if necessary.
+            # -------------------------------------------------------------
+            # FIX: Removed the manual "embed_texts()" call here. 
+            # We now rely solely on store.add_documents() to handle embedding 
+            # AND upsert in one step. This prevents double-billing/double-requests.
+            # -------------------------------------------------------------
+            
             success = False
+            last_err = None
+            
             for attempt in range(1, retry_attempts + 1):
                 try:
-                    # The high-level API will call embedding again unless we upsert directly; it's acceptable for now.
                     store.add_documents(batch_docs)
                     success = True
                     break
                 except Exception as e:
                     last_err = e
-                    if attempt < retry_attempts:
+                    # Special handling for Rate Limits (429) -> wait longer
+                    if 'rate limit' in str(e).lower() or '429' in str(e):
+                        time.sleep(30)
+                    elif attempt < retry_attempts:
                         time.sleep(0.4 * attempt + random.uniform(0, 0.2))
-                        continue
-                    raise
+                    continue
 
             if not success:
                 raise RuntimeError(f"Failed to ingest batch starting at {i}: {last_err}")
