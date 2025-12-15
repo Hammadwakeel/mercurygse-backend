@@ -1,12 +1,12 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 import os
 import json
 import uuid
 import queue
 import threading
 from typing import Optional
-from ..utils import save_upload_file_tmp
+from ..utils import save_upload_file_tmp, read_metadata
 from ..services.pipeline_service import run_pipeline
 import logging
 import base64
@@ -73,3 +73,26 @@ async def process_pdf_stream(file: UploadFile = File(...), max_pages: Optional[i
                 pass
 
     return StreamingResponse(event_generator(), media_type='text/event-stream')
+
+
+
+@router.get("/report/download/{job_id}")
+async def download_report_by_job(job_id: str):
+    """Download the generated markdown report by `job_id` (uuid stored in metadata).
+
+    Falls back to 404 if not found. This is the recommended, safe way to retrieve reports.
+    """
+    try:
+        entries = read_metadata()
+    except Exception:
+        entries = []
+
+    # prefer most recent matching entry
+    for e in reversed(entries):
+        if str(e.get('uuid')) == str(job_id):
+            path = e.get('report')
+            if path and os.path.exists(path):
+                return FileResponse(path, media_type='text/markdown', filename=os.path.basename(path))
+            else:
+                raise HTTPException(status_code=404, detail='Report file not found')
+    raise HTTPException(status_code=404, detail='Job not found')
