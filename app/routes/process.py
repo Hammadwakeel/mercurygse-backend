@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Optional
 import logging
+from pdf2image import pdfinfo_from_path  # Added for security validation
 
 from ..utils import (
     save_upload_file_tmp, 
@@ -31,11 +32,26 @@ async def process_pdf_stream(
     download: Optional[bool] = False, 
     background_tasks: BackgroundTasks = None
 ):
+    # Basic extension check (first line of defense)
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail='Only PDF uploads are supported')
     
     # 1. Save locally first (needed for processing) - Non-blocking I/O
     tmp_path, filename = await run_in_threadpool(save_upload_file_tmp, file)
+    
+    # --- SECURITY CHECK: Validate actual file content ---
+    # Attempt to read PDF info. If this fails, it's not a valid PDF.
+    try:
+        await run_in_threadpool(pdfinfo_from_path, tmp_path)
+    except Exception:
+        # Cleanup the invalid file immediately
+        if os.path.exists(tmp_path):
+            try: os.remove(tmp_path)
+            except: pass
+        logger.warning(f"Uploaded file {filename} claimed to be PDF but failed validation.")
+        raise HTTPException(status_code=400, detail="Invalid PDF file. The file is corrupted or not a valid PDF document.")
+    # ----------------------------------------------------
+
     job_id = str(uuid.uuid4())
     logger.info("Received upload %s -> %s; job=%s", file.filename, tmp_path, job_id)
 
