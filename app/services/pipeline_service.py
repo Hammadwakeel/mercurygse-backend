@@ -459,7 +459,6 @@ def router_worker(pdf_path: str, page_index: int) -> Dict:
     finally:
         try: img.close()
         except: pass
-        # gc.collect() REMOVED FOR PRODUCTION PERFORMANCE
 
 
 def simple_worker(pdf_path: str, page_index: int) -> Dict:
@@ -494,7 +493,6 @@ def simple_worker(pdf_path: str, page_index: int) -> Dict:
     finally:
         try: img.close()
         except: pass
-        # gc.collect() REMOVED FOR PRODUCTION PERFORMANCE
 
 
 def complex_worker(pdf_path: str, page_index: int) -> Dict:
@@ -528,7 +526,6 @@ def complex_worker(pdf_path: str, page_index: int) -> Dict:
     finally:
         try: img.close()
         except: pass
-        # gc.collect() REMOVED FOR PRODUCTION PERFORMANCE
 
 
 # Producer / Consumer (streaming)
@@ -663,7 +660,6 @@ def run_pipeline(
     progress_hook: Optional[Callable[[dict], None]] = None,
     doc_id: Optional[str] = None,
     original_filename: Optional[str] = None,
-    keep_report: bool = False, # retained for compatibility, effectively handled by return value now
 ):
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"{pdf_path} not found")
