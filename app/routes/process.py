@@ -1,12 +1,11 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 import os
 import json
 import uuid
 import queue
 import threading
-import base64
 import time
 from typing import Optional
 import logging
@@ -40,7 +39,7 @@ async def process_pdf_stream(
     job_id = str(uuid.uuid4())
     logger.info("Received upload %s -> %s; job=%s", file.filename, tmp_path, job_id)
 
-    # 2. Upload Original PDF to Supabase Bucket (Background Task recommended, but doing await here for safety)
+    # 2. Upload Original PDF to Supabase Bucket
     pdf_bucket_path = f"jobs/{job_id}/source.pdf"
     await run_in_threadpool(upload_file_to_bucket, tmp_path, pdf_bucket_path)
 
@@ -61,8 +60,7 @@ async def process_pdf_stream(
             max_pages=max_pages, 
             progress_hook=progress_hook, 
             doc_id=job_id, 
-            original_filename=filename, 
-            keep_report=True 
+            original_filename=filename
         )
 
     # --- BLOCKING / DOWNLOAD MODE ---
@@ -73,11 +71,9 @@ async def process_pdf_stream(
             
             # Identify the generated local report path
             local_report_path = None
-            if isinstance(ret, FileResponse):
-                local_report_path = ret.path
-            elif isinstance(ret, dict):
+            if isinstance(ret, dict):
                 local_report_path = ret.get('report_path')
-                # Fallback for error texts
+                # Fallback for error texts (e.g. billing limits)
                 if not local_report_path and ret.get('report_text'):
                     fp = os.path.join(DATA_DIR, f"report_{job_id}.md")
                     with open(fp, 'w', encoding='utf-8') as f:
@@ -125,7 +121,8 @@ async def process_pdf_stream(
 
         except Exception as e:
             if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+                try: os.remove(tmp_path)
+                except: pass
             raise HTTPException(status_code=500, detail=str(e))
 
     # --- STREAMING MODE ---
