@@ -7,14 +7,8 @@ import logging
 from .core import config as core_config
 from .services import model_client
 
-# Import your routers explicitly
-# Note: Ensure process.py and health.py are accessible. 
-# If they are in a 'routes' folder, change to: from .routes import process, health, files
-try:
-    from . import process, health, files
-except ImportError:
-    # Fallback if files are inside a 'routes' package
-    from .routes import process, health
+# Import routers
+from .routes import process, health, files
 
 logger = logging.getLogger("pdf_extraction")
 if not logger.handlers:
@@ -80,14 +74,14 @@ def startup_event():
 
 # --- Router Registration ---
 
-# Mount the File Management Router (e.g., /files/upload)
-app.include_router(files.router, prefix="/files", tags=["File Management"]) # <--- Register here
-
 # Mount the Processing Router (e.g., /process/pdf/stream)
 app.include_router(process.router, prefix="/process", tags=["Process"])
 
 # Mount the Health Router (e.g., /health/live)
 app.include_router(health.router, prefix="/health", tags=["Health"])
+
+# --- FIX: REGISTER THE FILES ROUTER ---
+app.include_router(files.router, prefix="/files", tags=["File Management"])
 
 @app.get("/", tags=["root"])
 def read_root():
