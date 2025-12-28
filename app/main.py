@@ -46,6 +46,8 @@ def startup_event():
     logger.info("VOYAGE_API_KEY set: %s", bool(cfg.get("VOYAGE_API_KEY")))
     logger.info("QDRANT_URL set: %s", bool(cfg.get("QDRANT_URL")))
     logger.info("QDRANT_API_KEY set: %s", bool(cfg.get("QDRANT_API_KEY")))
+    logger.info("SUPABASE_URL set: %s", bool(cfg.get("SUPABASE_URL")))
+    logger.info("SUPABASE_KEY set: %s", bool(cfg.get("SUPABASE_KEY")))
 
     # Initialize GenAI
     genai = model_client.init_genai_client(cfg.get("GOOGLE_API_KEY"))
