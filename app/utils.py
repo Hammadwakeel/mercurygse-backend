@@ -113,3 +113,42 @@ def start_cleanup_thread(retention_seconds: int = 24 * 3600, interval_seconds: i
     t = _th.Thread(target=cleanup_expired_reports, args=(retention_seconds, interval_seconds), daemon=True)
     t.start()
     _cleanup_thread_started = True
+
+
+def get_job_by_filename(filename: str) -> Optional[Dict]:
+    """Fetch a job entry by its original filename."""
+    try:
+        # Query Supabase for the filename
+        response = supabase.table("job_metadata")\
+            .select("*")\
+            .eq("original_filename", filename)\
+            .limit(1)\
+            .execute()
+        
+        if response.data and len(response.data) > 0:
+            row = response.data[0]
+            return {
+                "uuid": row["job_id"],
+                "original_filename": row["original_filename"],
+                "report": row["report_path"],
+                "created_at": row["created_at"],
+                "expires_at": row["expires_at"]
+            }
+    except Exception as e:
+        print(f"Error checking duplicate: {e}")
+    return None
+
+def list_all_jobs(limit: int = 100) -> Dict[str, List[str]]:
+    """Return a separated list of PDF filenames and MD report paths."""
+    try:
+        data = read_metadata(limit)
+        pdf_files = [item["original_filename"] for item in data]
+        md_files = [item["report"] for item in data if item.get("report")]
+        return {
+            "pdf_files": pdf_files,
+            "md_files": md_files,
+            "full_data": data # Useful if frontend needs ID mapping
+        }
+    except Exception as e:
+        print(f"Error listing files: {e}")
+        return {"pdf_files": [], "md_files": []}

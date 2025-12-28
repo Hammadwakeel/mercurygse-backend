@@ -9,9 +9,9 @@ from .services import model_client
 
 # Import your routers explicitly
 # Note: Ensure process.py and health.py are accessible. 
-# If they are in a 'routes' folder, change to: from .routes import process, health
+# If they are in a 'routes' folder, change to: from .routes import process, health, files
 try:
-    from . import process, health
+    from . import process, health, files
 except ImportError:
     # Fallback if files are inside a 'routes' package
     from .routes import process, health
@@ -79,6 +79,9 @@ def startup_event():
         logger.exception("Failed to start cleanup thread")
 
 # --- Router Registration ---
+
+# Mount the File Management Router (e.g., /files/upload)
+app.include_router(files.router, prefix="/files", tags=["File Management"]) # <--- Register here
 
 # Mount the Processing Router (e.g., /process/pdf/stream)
 app.include_router(process.router, prefix="/process", tags=["Process"])
