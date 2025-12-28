@@ -1,42 +1,26 @@
-# Use an official lightweight Python image
+# Use a lightweight Python base image
 FROM python:3.10-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    HF_HOME=/app/.cache/huggingface
-
-# Set the working directory
-WORKDIR /app
-
-# --- NEW: Install System Dependencies (Poppler) ---
-# We update apt, install poppler-utils, and clean up to keep the image small
+# Install system dependencies required for pdf2image (poppler)
 RUN apt-get update && apt-get install -y \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user with a specific UID (1000)
-RUN useradd -m -u 1000 user && \
-    chown -R user:user /app
+# Set working directory
+WORKDIR /app
 
-# Switch to the non-root user
-USER user
+# Copy requirements first to leverage Docker cache
+COPY requirements.txt .
 
-# Set up the PATH
-ENV PATH="/home/user/.local/bin:$PATH"
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy requirements
-COPY --chown=user:user requirements.txt .
+# Copy the rest of the application code
+COPY . .
 
-# Install dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY --chown=user:user . .
-
-# Expose port 7860
+# Expose the port FastAPI runs on
 EXPOSE 7860
 
-# Command to run the application
+# Command to run the application (assuming your main app file is app/main.py)
+# Adjust "app.main:app" if your structure is different.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
