@@ -5,17 +5,50 @@ import logging
 from typing import List, Dict, Optional, Callable
 import os
 from .model_client import init_qdrant_client, init_embeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger(__name__)
 
 # chunking regex
 PAGE_SPLIT_RE = re.compile(r'(?m)^(##\s+Page\s+\d+.*)$')
 
+# Cache for vector size to avoid repeated API calls
+# Voyage-3-large is 1024 dimensions.
+_VECTOR_SIZE_CACHE = None
 
 def chunk_markdown_by_page(md_path: str) -> List[Dict]:
+    """
+    Splits markdown into page-based chunks. 
+    Falls back to recursive character splitting if page headers are missing.
+    """
     with open(md_path, 'r', encoding='utf-8') as f:
         md = f.read()
+    
     parts = PAGE_SPLIT_RE.split(md)
+    
+    # FALLBACK LOGIC:
+    # If regex split results in too few parts (likely failed to match headers)
+    # and the document is large enough to warrant splitting.
+    if len(parts) < 2 and len(md) > 500:
+        logger.warning(f"Regex chunking failed for {os.path.basename(md_path)} (no '## Page X' found). Using recursive fallback.")
+        
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000, 
+            chunk_overlap=100,
+            separators=["\n\n", "\n", " ", ""]
+        )
+        texts = splitter.split_text(md)
+        
+        # Return fallback chunks
+        return [{
+            'id': f'chunk_{i}', 
+            'page': 1, # Dummy page number since we lost structure
+            'page_type': 'fallback', 
+            'text': t, 
+            'char_length': len(t)
+        } for i, t in enumerate(texts)]
+
+    # STANDARD LOGIC (Regex successful)
     chunks = []
     preamble = parts[0].strip()
     if preamble:
@@ -76,22 +109,36 @@ def ingest_chunks_into_qdrant(
         # lazy import heavy libs
         from langchain_qdrant import QdrantVectorStore
         from langchain_core.documents import Document
+        from qdrant_client.models import VectorParams, Distance
 
-        # compute vector size by embedding a small sample
-        try:
-            sample_vec = emb.embed_query('sample size')
-            vector_size = len(sample_vec)
-        except Exception:
-            vector_size = None
+        # PERFORMANCE FIX: Use Cached Vector Size
+        global _VECTOR_SIZE_CACHE
+        if _VECTOR_SIZE_CACHE is None:
+            # Check if we can determine it from the embedding object or default to 1024 (Voyage)
+            try:
+                # Attempt a single call to set it dynamically if needed, but only once per app lifecycle
+                logger.info("Determining embedding vector size...")
+                sample_vec = emb.embed_query('sample size')
+                _VECTOR_SIZE_CACHE = len(sample_vec)
+                logger.info(f"Vector size set to {_VECTOR_SIZE_CACHE}")
+            except Exception:
+                # Default fallback if call fails
+                logger.warning("Failed to determine vector size dynamically, defaulting to 1024")
+                _VECTOR_SIZE_CACHE = 1024
+        
+        vector_size = _VECTOR_SIZE_CACHE
 
         # create collection if not exists
         try:
             existing = [c.name for c in qc.get_collections().collections]
         except Exception:
             existing = []
+        
         if collection_name not in existing and vector_size is not None:
-            from qdrant_client.models import VectorParams, Distance
-            qc.create_collection(collection_name=collection_name, vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE))
+            qc.create_collection(
+                collection_name=collection_name, 
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+            )
 
         # build documents (skip page 0 preamble)
         docs_all = []
@@ -120,12 +167,6 @@ def ingest_chunks_into_qdrant(
                     time.sleep(slow_seconds)
                 except Exception:
                     pass
-
-            # -------------------------------------------------------------
-            # FIX: Removed the manual "embed_texts()" call here. 
-            # We now rely solely on store.add_documents() to handle embedding 
-            # AND upsert in one step. This prevents double-billing/double-requests.
-            # -------------------------------------------------------------
             
             success = False
             last_err = None

@@ -1,14 +1,11 @@
 """
-Full pipeline service adapted from the user's original script.
-
-This module expects API clients to be available via `app.services.model_client`.
-Per project configuration, this pipeline performs real model calls and Qdrant ingestion.
+Full pipeline service.
+Updated for production: Removed aggressive GC, improved error handling, decoupled from HTTP responses.
 """
 import os
 import time
 import random
 import re
-import gc
 import queue
 import threading
 from typing import List, Optional, Callable, Any, Dict, Tuple
@@ -24,8 +21,6 @@ from . import model_client
 from google import genai as _genai_module
 from google.genai import types as genai_types
 from .. import utils as app_utils
-from fastapi.responses import FileResponse
-from starlette.background import BackgroundTask
 import json
 from . import qdrant_service
 import tempfile
@@ -464,7 +459,7 @@ def router_worker(pdf_path: str, page_index: int) -> Dict:
     finally:
         try: img.close()
         except: pass
-        gc.collect()
+        # gc.collect() REMOVED FOR PRODUCTION PERFORMANCE
 
 
 def simple_worker(pdf_path: str, page_index: int) -> Dict:
@@ -499,7 +494,7 @@ def simple_worker(pdf_path: str, page_index: int) -> Dict:
     finally:
         try: img.close()
         except: pass
-        gc.collect()
+        # gc.collect() REMOVED FOR PRODUCTION PERFORMANCE
 
 
 def complex_worker(pdf_path: str, page_index: int) -> Dict:
@@ -533,7 +528,7 @@ def complex_worker(pdf_path: str, page_index: int) -> Dict:
     finally:
         try: img.close()
         except: pass
-        gc.collect()
+        # gc.collect() REMOVED FOR PRODUCTION PERFORMANCE
 
 
 # Producer / Consumer (streaming)
@@ -668,7 +663,7 @@ def run_pipeline(
     progress_hook: Optional[Callable[[dict], None]] = None,
     doc_id: Optional[str] = None,
     original_filename: Optional[str] = None,
-    keep_report: bool = False,
+    keep_report: bool = False, # retained for compatibility, effectively handled by return value now
 ):
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"{pdf_path} not found")
@@ -682,7 +677,6 @@ def run_pipeline(
     results = []
 
     # start producer
-
     if progress_hook:
         progress_hook({"event": "started", "pages_total": pages_to_process, "pdf": os.path.basename(pdf_path)})
 
@@ -706,6 +700,7 @@ def run_pipeline(
         progress_hook({"event": "report_saved", "report_path": report_path, "pages_processed": pages_processed})
 
     # Chunk and ingest into Qdrant
+    ingest_res = {}
     try:
         if progress_hook:
             progress_hook({"event": "chunking_started", "report_path": report_path})
@@ -731,62 +726,26 @@ def run_pipeline(
         if progress_hook:
             progress_hook({"event": "ingest_finished", "result": ingest_res})
 
-        # if successful ingestion, persist metadata and cleanup
-        if isinstance(ingest_res, dict) and ingest_res.get("ingested"):
-            # append metadata entry if doc_id provided
+        # NOTE: Metadata persistance is now handled by the caller (process.py -> Supabase)
+        # to ensure consistency with bucket uploads and avoid file-lock contention.
+
+        # If ingestion failed due to billing/permission on the embeddings provider, 
+        # surface the report contents to the caller so they can download/use it without ingestion.
+        if isinstance(ingest_res, dict) and ingest_res.get("error") == "voyage_billing":
+            msg = ingest_res.get("message") or "voyage billing error"
+            if progress_hook:
+                progress_hook({"event": "ingest_skipped", "reason": "voyage_billing", "message": msg})
+            # include report content in the final payload if small enough
             try:
-                if doc_id or original_filename:
-                    now = time.time()
-                    entry = {
-                        "uuid": doc_id or "",
-                        "original_filename": original_filename or os.path.basename(pdf_path),
-                        "report": report_path,
-                        "created_at": now,
-                        "expires_at": now + (24 * 3600),
-                    }
-                    app_utils.append_metadata_entry(entry)
-            except Exception as e:
-                print(f"Warning: failed to append metadata: {e}")
-                # remove temp files unless caller asked to keep the report (e.g., for direct download)
-                try:
-                    if not keep_report:
-                        if os.path.exists(pdf_path):
-                            os.remove(pdf_path)
-                        if os.path.exists(report_path):
-                            os.remove(report_path)
-                except Exception as e:
-                    print(f"Warning: failed to remove temp files: {e}")
-        else:
-            # If ingestion failed due to billing/permission on the embeddings provider, skip deletion
-            # and surface the report contents to the caller so they can download/use it without ingestion.
-            if isinstance(ingest_res, dict) and ingest_res.get("error") == "voyage_billing":
-                msg = ingest_res.get("message") or "voyage billing error"
-                if progress_hook:
-                    progress_hook({"event": "ingest_skipped", "reason": "voyage_billing", "message": msg})
-                # include report content in the final payload if small enough
-                try:
-                    size = os.path.getsize(report_path)
-                    if size < 2 * 1024 * 1024:  # only attach if <2MB
-                        with open(report_path, 'r', encoding='utf-8') as _f:
-                            report_text = _f.read()
-                        if progress_hook:
-                            progress_hook({"event": "report_attached", "report_text": report_text, "report_path": report_path})
-                except Exception:
-                    # best-effort only
-                    pass
-                # also append metadata so the download-by-job endpoint can find it
-                try:
-                    now = time.time()
-                    entry = {
-                        "uuid": doc_id or "",
-                        "original_filename": original_filename or os.path.basename(pdf_path),
-                        "report": report_path,
-                        "created_at": now,
-                        "expires_at": now + (24 * 3600),
-                    }
-                    app_utils.append_metadata_entry(entry)
-                except Exception:
-                    pass
+                size = os.path.getsize(report_path)
+                if size < 2 * 1024 * 1024:  # only attach if <2MB
+                    with open(report_path, 'r', encoding='utf-8') as _f:
+                        report_text = _f.read()
+                    if progress_hook:
+                        progress_hook({"event": "report_attached", "report_text": report_text, "report_path": report_path})
+            except Exception:
+                # best-effort only
+                pass
 
     except Exception as e:
         if progress_hook:
@@ -796,24 +755,16 @@ def run_pipeline(
     if progress_hook:
         progress_hook({"event": "completed", "pages_processed": pages_processed, "ingest_result": ingest_res, "report_path": report_path})
 
-    # If caller requested the report be kept for direct download, return a FileResponse
-    def _cleanup_files(*paths: str):
-        for p in paths:
-            try:
-                if p and os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
+    # Decoupled return: We return a pure dict, allowing the controller (process.py) 
+    # to decide whether to upload to bucket, stream, or return as file.
+    out = {
+        "report_path": report_path, 
+        "pages_processed": pages_processed, 
+        "results": results, 
+        "ingest": ingest_res
+    }
 
-    if keep_report:
-        # Attach metadata into headers as JSON string (caller can parse)
-        meta = {"pages_processed": pages_processed, "ingest": ingest_res}
-        headers = {"X-Pipeline-Meta": json.dumps(meta)}
-        bg = BackgroundTask(_cleanup_files, pdf_path, report_path)
-        return FileResponse(path=report_path, media_type='text/markdown', filename=os.path.basename(report_path), background=bg, headers=headers)
-
-    # also return report text (best-effort) when ingestion failed due to billing so callers get the MD
-    out = {"report_path": report_path, "pages_processed": pages_processed, "results": results, "ingest": ingest_res}
+    # Attach text payload if ingestion failed (fallback logic)
     try:
         if isinstance(ingest_res, dict) and ingest_res.get("error") == "voyage_billing":
             size = os.path.getsize(report_path)

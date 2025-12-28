@@ -1,16 +1,19 @@
 import os
 import tempfile
-from typing import Tuple
-import json
 import time
 import threading
+from typing import Tuple, List, Dict, Optional
+from supabase import create_client, Client
+from .core import config as core_config
 
-# metadata storage for lightweight JSON DB
+# Initialize Supabase Client
+_cfg = core_config.load_config()
+supabase: Client = create_client(_cfg["SUPABASE_URL"], _cfg["SUPABASE_KEY"])
+BUCKET_NAME = _cfg["STORAGE_BUCKET"]
+
+# Local data dir for temp processing only
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
-METADATA_PATH = os.path.join(DATA_DIR, "metadata.json")
-_metadata_lock = threading.Lock()
-
 
 def save_upload_file_tmp(upload_file) -> Tuple[str, str]:
     """Save a FastAPI UploadFile to a temporary file and return (tmp_path, filename)."""
@@ -21,73 +24,86 @@ def save_upload_file_tmp(upload_file) -> Tuple[str, str]:
         out.write(content)
     return tmp_path, upload_file.filename
 
+# --- Supabase Storage Helpers ---
+
+def upload_file_to_bucket(file_path: str, destination_path: str) -> str:
+    """Uploads a local file to Supabase Storage and returns the bucket path."""
+    try:
+        with open(file_path, 'rb') as f:
+            supabase.storage.from_(BUCKET_NAME).upload(
+                path=destination_path,
+                file=f,
+                file_options={"content-type": "application/octet-stream", "upsert": "true"}
+            )
+        return destination_path
+    except Exception as e:
+        print(f"Supabase Upload failed: {e}")
+        # Proceeding allows the pipeline to continue even if backup fails, 
+        # but in strict mode you might want to raise.
+        return ""
+
+def get_signed_url(bucket_path: str, expiry_seconds=3600) -> Optional[str]:
+    """Generates a secure, temporary download link."""
+    try:
+        res = supabase.storage.from_(BUCKET_NAME).create_signed_url(bucket_path, expiry_seconds)
+        return res.get("signedURL")
+    except Exception as e:
+        print(f"Failed to generate signed URL: {e}")
+        return None
+
+# --- Supabase Database Helpers ---
 
 def append_metadata_entry(entry: dict):
-    """Append an entry to the metadata JSON file (list of entries). Thread-safe."""
-    with _metadata_lock:
-        data = []
-        if os.path.exists(METADATA_PATH):
-            try:
-                with open(METADATA_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                data = []
-        data.append(entry)
-        with open(METADATA_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    """Insert a new job entry into Supabase DB."""
+    try:
+        data = {
+            "job_id": str(entry.get("uuid")),
+            "original_filename": entry.get("original_filename"),
+            "report_path": entry.get("report"), # Stores the BUCKET PATH (e.g., jobs/123/report.md)
+            "created_at": int(entry.get("created_at", time.time())),
+            "expires_at": int(entry.get("expires_at", time.time() + 86400))
+        }
+        supabase.table("job_metadata").insert(data).execute()
+    except Exception as e:
+        print(f"Error writing metadata to Supabase: {e}")
 
+def read_metadata(limit: int = 100) -> List[Dict]:
+    """Fetch recent metadata entries from Supabase."""
+    try:
+        response = supabase.table("job_metadata")\
+            .select("*")\
+            .order("created_at", desc=True)\
+            .limit(limit)\
+            .execute()
+        
+        results = []
+        for row in response.data:
+            results.append({
+                "uuid": row["job_id"],
+                "original_filename": row["original_filename"],
+                "report": row["report_path"],
+                "created_at": row["created_at"],
+                "expires_at": row["expires_at"]
+            })
+        return results
+    except Exception as e:
+        print(f"Error reading metadata from Supabase: {e}")
+        return []
 
-def read_metadata() -> list:
-    with _metadata_lock:
-        if not os.path.exists(METADATA_PATH):
-            return []
-        try:
-            with open(METADATA_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-
-
-def write_metadata(entries: list):
-    with _metadata_lock:
-        with open(METADATA_PATH, 'w', encoding='utf-8') as f:
-            json.dump(entries, f, ensure_ascii=False, indent=2)
-
-
+# Cleanup is now less critical for local disk, but good for DB hygiene
+# Only runs if explicitly started by main.py
 def cleanup_expired_reports(retention_seconds: int = 24 * 3600, interval_seconds: int = 60 * 60):
-    """Background loop that removes expired report files and prunes metadata entries.
-
-    - `retention_seconds` controls how long reports are kept after `created_at` or `expires_at`.
-    - `interval_seconds` controls how often the background loop runs.
-    """
+    """Background loop that cleans up old DB entries. Storage lifecycle rules should handle files."""
     while True:
         try:
-            entries = read_metadata()
-            now = time.time()
-            changed = False
-            remaining = []
-            for e in entries:
-                expires = e.get('expires_at') or (e.get('created_at', 0) + retention_seconds)
-                if expires and now >= float(expires):
-                    # delete file if present
-                    p = e.get('report')
-                    try:
-                        if p and os.path.exists(p):
-                            os.remove(p)
-                    except Exception:
-                        pass
-                    changed = True
-                else:
-                    remaining.append(e)
-            if changed:
-                write_metadata(remaining)
+            now = int(time.time())
+            # Simple cleanup: Delete DB rows where expires_at < now
+            supabase.table("job_metadata").delete().lt("expires_at", now).execute()
         except Exception:
             pass
         time.sleep(interval_seconds)
 
-
 _cleanup_thread_started = False
-
 
 def start_cleanup_thread(retention_seconds: int = 24 * 3600, interval_seconds: int = 60 * 60):
     global _cleanup_thread_started

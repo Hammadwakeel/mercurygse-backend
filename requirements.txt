@@ -9,3 +9,5 @@ langchain
 python-multipart
 python-dotenv
 langchain_qdrant
+supabase
+starlette
