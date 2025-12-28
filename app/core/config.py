@@ -1,9 +1,8 @@
 import os
 from typing import Dict
-
 from dotenv import load_dotenv
-load_dotenv()
 
+load_dotenv()
 
 def load_config() -> Dict[str, str]:
     return {
@@ -13,4 +12,8 @@ def load_config() -> Dict[str, str]:
         "QDRANT_API_KEY": os.environ.get("QDRANT_API_KEY", ""),
         "QDRANT_COLLECTION": os.environ.get("QDRANT_COLLECTION", "mercurygse"),
         "QDRANT_BATCH_SIZE": os.environ.get("QDRANT_BATCH_SIZE", "256"),
+        # Supabase Config
+        "SUPABASE_URL": os.environ.get("SUPABASE_URL", "https://psvpgvvmrinhyymiftcs.supabase.co"),
+        "SUPABASE_KEY": os.environ.get("SUPABASE_KEY", "sb_publishable_eIh_ilnbQaPb1LMNliKClw_0wPnRpNw"),
+        "STORAGE_BUCKET": os.environ.get("STORAGE_BUCKET", "pdf_store"),
     }
