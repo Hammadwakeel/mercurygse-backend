@@ -17,7 +17,8 @@ from ..utils import (
     get_signed_url, 
     append_metadata_entry, 
     read_metadata,
-    DATA_DIR
+    DATA_DIR,
+    get_job_by_filename  # <--- Added duplicate check utility import
 )
 from ..services.pipeline_service import run_pipeline
 
@@ -35,6 +36,17 @@ async def process_pdf_stream(
     # Basic extension check (first line of defense)
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail='Only PDF uploads are supported')
+
+    # --- DUPLICATE CHECK START ---
+    # Check DB before doing any heavy processing or saving files
+    existing_job = await run_in_threadpool(get_job_by_filename, file.filename)
+    if existing_job:
+        # If found, return a 409 Conflict error with details about the existing job
+        raise HTTPException(
+            status_code=409, 
+            detail=f"Duplicate file detected. '{file.filename}' has already been processed (Job ID: {existing_job.get('uuid')})."
+        )
+    # --- DUPLICATE CHECK END ---
     
     # 1. Save locally first (needed for processing) - Non-blocking I/O
     tmp_path, filename = await run_in_threadpool(save_upload_file_tmp, file)
