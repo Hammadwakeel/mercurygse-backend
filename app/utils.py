@@ -1,7 +1,6 @@
 import os
 import tempfile
 import time
-import threading
 from typing import Tuple, List, Dict, Optional
 from supabase import create_client, Client
 from .core import config as core_config
@@ -109,6 +108,7 @@ def start_cleanup_thread(retention_seconds: int = 24 * 3600, interval_seconds: i
     global _cleanup_thread_started
     if _cleanup_thread_started:
         return
+    # Use local import to keep global namespace clean
     import threading as _th
     t = _th.Thread(target=cleanup_expired_reports, args=(retention_seconds, interval_seconds), daemon=True)
     t.start()
